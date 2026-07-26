@@ -1,15 +1,23 @@
-# Mobile-Triggered AI Screen Analyzer
+# Mobile-Triggered AI Screen Analyzer & Autonomous Bot
 
-A local Wi-Fi automation system that allows you to press a button on your mobile phone, triggering your laptop to silently capture its active screen, optimize the image in memory, process it via the Gemini Vision API using dynamic or custom prompts, and return the final answer to your phone interface.
+A local Wi-Fi automation system that allows you to press a button on your mobile phone, triggering your laptop to silently capture its active screen, optimize the image in memory, process it via the Gemini Vision API using dynamic or custom prompts, and return the final answer to your phone interface—with a fully autonomous **Auto Bot Mode**.
+
+---
+
+## Features & Modes
+
+* **📷 Manual Mode:** Original single-fire trigger button. Select predefined or custom prompts, capture screen instantly, and view AI answers on your phone.
+* **🤖 Auto Bot Mode:** Autonomous loop that captures the screen, performs **single-call Gemini spatial tracking** to locate option checkboxes and Submit buttons, executes randomized **scatter clicks** to guarantee selection, clicks Submit, and auto-iterates through questions.
+* **🔒 Token Security:** Pre-shared secret token (`X-Auth-Token` header) protects endpoints from unauthorized network access.
+* **💾 Session History:** Maintains a live audit trail of captures in `sessionStorage` (clears automatically when closing tab).
 
 ---
 
 ## Architecture & Tech Stack
 
-*   **Backend (Host):** FastAPI (Python), `mss` (high-speed screen capture), `Pillow` (in-memory downscaling), `google-genai` SDK (`gemini-2.5-flash`).
-*   **Frontend (Trigger/Mobile):** React (Vite template), mobile-responsive UI with session-only history storage (`sessionStorage`).
-*   **Security:** Token-based authentication (`X-Auth-Token` header validation).
-*   **Network:** Local Wi-Fi network (direct laptop-to-phone communication via local IP).
+* **Backend (Host):** FastAPI (Python), `mss` (high-speed capture), `Pillow` (in-memory compression), `PyAutoGUI` (mouse automation), `google-genai` SDK (`gemini-2.5-flash` / `gemini-3.5-flash-lite`).
+* **Frontend (Trigger/Mobile):** React (Vite template), Dual Mode tabs (Manual vs Auto Bot), live status polling.
+* **Network:** Local Wi-Fi network (direct laptop-to-phone communication via local IP).
 
 ---
 
@@ -40,7 +48,7 @@ cp .env.example .env
 Open `.env` and add your Gemini API Key and secret `API_TOKEN`:
 ```env
 GEMINI_API_KEY=your_actual_gemini_api_key
-GEMINI_MODEL=gemini-3.5-flash-lite
+GEMINI_MODEL=gemini-2.5-flash
 API_TOKEN=super-secret-token-123
 ```
 
@@ -75,4 +83,4 @@ Note the local network URL displayed in your terminal (e.g., `http://192.168.1.5
 3. In the app settings on your phone:
    - Ensure the Backend URL points to `http://<laptop-ip>:8000`.
    - Enter your `Auth Token` matching the `API_TOKEN` set in your laptop's `.env` file.
-4. Choose an AI mode or type a custom prompt, then tap **Capture & Analyze Screen**!
+4. Choose between **Manual Mode** (single button capture) or **Auto Bot Mode** (Start/Stop autonomous loop)!

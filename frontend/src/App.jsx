@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 function App() {
+  const [activeTab, setActiveTab] = useState('manual'); // 'manual' or 'auto'
   const [prompts, setPrompts] = useState({});
   const [selectedPrompt, setSelectedPrompt] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
@@ -9,6 +10,24 @@ function App() {
   const [authToken, setAuthToken] = useState('super-secret-token-123');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState('');
+  const [error, setError] = useState('');
+  const [connected, setConnected] = useState(false);
+
+  // Auto-Bot Mode State
+  const [maxCycles, setMaxCycles] = useState(15);
+  const [delaySeconds, setDelaySeconds] = useState(4.0);
+  const [automationStatus, setAutomationStatus] = useState({
+    is_running: false,
+    cycle: 0,
+    max_cycles: 15,
+    last_action: 'Idle',
+    last_answer: null,
+    error: null
+  });
+  const fetchStatusRef = useRef(null);
+  const lastRecordedCycleRef = useRef(0);
+
+  // Session History (sessionStorage)
   const [history, setHistory] = useState(() => {
     try {
       const saved = sessionStorage.getItem('session_history');
@@ -17,10 +36,8 @@ function App() {
       return [];
     }
   });
-  const [error, setError] = useState('');
-  const [connected, setConnected] = useState(false);
 
-  // Fetch available prompts and check backend connection on load
+  // Fetch available prompts and connection status
   useEffect(() => {
     fetchPrompts();
   }, [backendUrl]);
@@ -33,6 +50,16 @@ function App() {
       console.error("Failed to save session history:", err);
     }
   }, [history]);
+
+  // Poll automation status when connected or running
+  useEffect(() => {
+    let interval;
+    if (connected) {
+      fetchStatusRef.current();
+      interval = setInterval(() => fetchStatusRef.current(), 1000);
+    }
+    return () => clearInterval(interval);
+  }, [connected, backendUrl]);
 
   const fetchPrompts = async () => {
     try {
@@ -53,7 +80,36 @@ function App() {
     }
   };
 
-  const handleCapture = async () => {
+  const fetchAutomationStatus = async () => {
+    try {
+      const res = await fetch(`${backendUrl}/automation-status`);
+      if (res.ok) {
+        const data = await res.json();
+        setAutomationStatus(data);
+
+        if (data.is_running && data.last_answer && data.cycle > 0 && data.cycle !== lastRecordedCycleRef.current) {
+          lastRecordedCycleRef.current = data.cycle;
+          const newItem = {
+            id: Date.now(),
+            timestamp: new Date().toLocaleTimeString(),
+            mode: `Auto Bot (Cycle ${data.cycle})`,
+            answer: data.last_answer
+          };
+          setHistory(prev => [newItem, ...prev]);
+        }
+
+        if (!data.is_running && data.cycle === 0) {
+          lastRecordedCycleRef.current = 0;
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch automation status:", err);
+    }
+  };
+
+  fetchStatusRef.current = fetchAutomationStatus;
+
+  const handleManualCapture = async () => {
     if (!selectedPrompt) {
       setError("Please select an AI prompt mode.");
       return;
@@ -92,7 +148,6 @@ function App() {
       const answerText = data.result;
       setResult(answerText);
 
-      // Add to session history
       const promptName = selectedPrompt === 'custom' 
         ? `Custom: ${customPrompt.substring(0, 30)}...` 
         : (prompts[selectedPrompt]?.name || selectedPrompt);
@@ -114,6 +169,55 @@ function App() {
     }
   };
 
+  const handleStartAutomation = async () => {
+    setError('');
+    try {
+      const res = await fetch(`${backendUrl}/start-automation`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Auth-Token': authToken,
+        },
+        body: JSON.stringify({
+          max_cycles: parseInt(maxCycles, 10),
+          delay_seconds: parseFloat(delaySeconds)
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || `Failed to start bot: ${res.status}`);
+      }
+
+      fetchAutomationStatus();
+    } catch (err) {
+      console.error("Start automation error:", err);
+      setError(err.message || "Failed to start autonomous bot.");
+    }
+  };
+
+  const handleStopAutomation = async () => {
+    try {
+      const res = await fetch(`${backendUrl}/stop-automation`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Auth-Token': authToken,
+        },
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "Failed to stop bot.");
+      }
+
+      fetchAutomationStatus();
+    } catch (err) {
+      console.error("Stop automation error:", err);
+      setError(err.message || "Failed to stop autonomous bot.");
+    }
+  };
+
   const clearHistory = () => {
     setHistory([]);
     sessionStorage.removeItem('session_history');
@@ -127,6 +231,22 @@ function App() {
           {connected ? '● Backend Connected' : '○ Disconnected'}
         </div>
       </header>
+
+      {/* Mode Switcher Tabs */}
+      <div className="tab-bar">
+        <button 
+          className={`tab-btn ${activeTab === 'manual' ? 'active' : ''}`}
+          onClick={() => setActiveTab('manual')}
+        >
+          📷 Manual Mode
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'auto' ? 'active' : ''}`}
+          onClick={() => setActiveTab('auto')}
+        >
+          🤖 Auto Bot Mode {automationStatus.is_running && <span className="running-dot">●</span>}
+        </button>
+      </div>
 
       <div className="settings-card">
         <label htmlFor="backend-url-input">Backend IP / URL:</label>
@@ -162,68 +282,152 @@ function App() {
         />
       </div>
 
-      <div className="control-card">
-        <label htmlFor="prompt-select">Select AI Mode:</label>
-        <select 
-          id="prompt-select"
-          value={selectedPrompt} 
-          onChange={(e) => setSelectedPrompt(e.target.value)}
-          disabled={loading || Object.keys(prompts).length === 0}
-        >
-          {Object.keys(prompts).length === 0 ? (
-            <option>Loading modes...</option>
-          ) : (
-            Object.entries(prompts).map(([key, val]) => (
-              <option key={key} value={key}>
-                {val.name}
-              </option>
-            ))
+      {/* MANUAL MODE UI */}
+      {activeTab === 'manual' && (
+        <div className="control-card">
+          <label htmlFor="prompt-select">Select AI Mode:</label>
+          <select 
+            id="prompt-select"
+            value={selectedPrompt} 
+            onChange={(e) => setSelectedPrompt(e.target.value)}
+            disabled={loading || Object.keys(prompts).length === 0}
+          >
+            {Object.keys(prompts).length === 0 ? (
+              <option>Loading modes...</option>
+            ) : (
+              Object.entries(prompts).map(([key, val]) => (
+                <option key={key} value={key}>
+                  {val.name}
+                </option>
+              ))
+            )}
+          </select>
+          {prompts[selectedPrompt] && (
+            <p className="prompt-desc">{prompts[selectedPrompt].description}</p>
           )}
-        </select>
-        {prompts[selectedPrompt] && (
-          <p className="prompt-desc">{prompts[selectedPrompt].description}</p>
-        )}
 
-        {selectedPrompt === 'custom' && (
-          <div className="custom-prompt-container" style={{ marginBottom: '16px' }}>
-            <label htmlFor="custom-prompt-input">Custom Prompt Instructions:</label>
-            <textarea
-              id="custom-prompt-input"
-              value={customPrompt}
-              onChange={(e) => setCustomPrompt(e.target.value)}
-              placeholder="Enter what you want the AI to do with the screen..."
-              rows={3}
-              style={{
-                width: '100%',
-                padding: '12px',
-                borderRadius: '8px',
-                border: '1px solid #475569',
-                background: '#0f172a',
-                color: '#f8fafc',
-                fontSize: '0.95rem',
-                boxSizing: 'border-box',
-                resize: 'vertical',
-                outline: 'none',
-                fontFamily: 'inherit'
-              }}
-            />
+          {selectedPrompt === 'custom' && (
+            <div className="custom-prompt-container" style={{ marginBottom: '16px' }}>
+              <label htmlFor="custom-prompt-input">Custom Prompt Instructions:</label>
+              <textarea
+                id="custom-prompt-input"
+                value={customPrompt}
+                onChange={(e) => setCustomPrompt(e.target.value)}
+                placeholder="Enter what you want the AI to do with the screen..."
+                rows={3}
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  borderRadius: '8px',
+                  border: '1px solid #475569',
+                  background: '#0f172a',
+                  color: '#f8fafc',
+                  fontSize: '0.95rem',
+                  boxSizing: 'border-box',
+                  resize: 'vertical',
+                  outline: 'none',
+                  fontFamily: 'inherit'
+                }}
+              />
+            </div>
+          )}
+
+          <button 
+            onClick={handleManualCapture} 
+            disabled={loading || !connected} 
+            className="btn-primary"
+          >
+            {loading ? (
+              <span className="spinner-container">
+                <span className="spinner"></span> Capturing & Analyzing...
+              </span>
+            ) : (
+              '📸 Capture & Analyze Screen'
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* AUTO BOT MODE UI */}
+      {activeTab === 'auto' && (
+        <div className="control-card">
+          <h2>Autonomous Bot Controller</h2>
+          <p className="prompt-desc">
+            Automatically captures questions, spatial tracks option boxes & submit buttons, clicks answers using scatter-clicks, and iterates through questions.
+          </p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
+            <div>
+              <label htmlFor="max-cycles-input">Max Cycles (1-15):</label>
+              <input 
+                id="max-cycles-input"
+                type="number" 
+                min="1" 
+                max="15" 
+                value={maxCycles} 
+                onChange={(e) => setMaxCycles(e.target.value)}
+                disabled={automationStatus.is_running}
+              />
+            </div>
+            <div>
+              <label htmlFor="delay-input">Cycle Delay (s):</label>
+              <input 
+                id="delay-input"
+                type="number" 
+                step="0.5" 
+                min="1" 
+                value={delaySeconds} 
+                onChange={(e) => setDelaySeconds(e.target.value)}
+                disabled={automationStatus.is_running}
+              />
+            </div>
           </div>
-        )}
 
-        <button 
-          onClick={handleCapture} 
-          disabled={loading || !connected} 
-          className="btn-primary"
-        >
-          {loading ? (
-            <span className="spinner-container">
-              <span className="spinner"></span> Capturing & Analyzing...
-            </span>
+          <div className="status-box" style={{ background: '#0f172a', padding: '14px', borderRadius: '10px', marginBottom: '16px', border: '1px solid #334155' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <span style={{ fontWeight: 600, color: automationStatus.is_running ? '#34d399' : '#94a3b8' }}>
+                {automationStatus.is_running ? '🤖 Bot Running' : '⏸ Bot Stopped'}
+              </span>
+              <span style={{ fontSize: '0.85rem', color: '#cbd5e1' }}>
+                Cycle: {automationStatus.cycle} / {automationStatus.max_cycles}
+              </span>
+            </div>
+
+            <div style={{ fontSize: '0.85rem', color: '#38bdf8', marginBottom: '4px' }}>
+              <strong>Last Action:</strong> {automationStatus.last_action}
+            </div>
+
+            {automationStatus.last_answer && (
+              <div style={{ fontSize: '0.85rem', color: '#a7f3d0' }}>
+                <strong>Last Detected Answer:</strong> {automationStatus.last_answer}
+              </div>
+            )}
+
+            {automationStatus.error && (
+              <div style={{ fontSize: '0.85rem', color: '#f87171', marginTop: '4px' }}>
+                <strong>Error:</strong> {automationStatus.error}
+              </div>
+            )}
+          </div>
+
+          {automationStatus.is_running ? (
+            <button 
+              onClick={handleStopAutomation} 
+              className="btn-danger"
+            >
+              ⏹ Stop Automation Bot
+            </button>
           ) : (
-            '📸 Capture & Analyze Screen'
+            <button 
+              onClick={handleStartAutomation} 
+              disabled={!connected} 
+              className="btn-primary"
+            >
+              ▶ Start Automation Bot
+            </button>
           )}
-        </button>
-      </div>
+        </div>
+      )}
 
       {error && (
         <div className="error-card">
@@ -232,7 +436,7 @@ function App() {
         </div>
       )}
 
-      {result && (
+      {result && activeTab === 'manual' && (
         <div className="result-card">
           <h2>Latest AI Answer</h2>
           <div className="result-content">
@@ -247,7 +451,7 @@ function App() {
             <h2 style={{ fontSize: '1.1rem', color: '#38bdf8', margin: 0 }}>Session History ({history.length})</h2>
             <button onClick={clearHistory} className="btn-secondary" style={{ fontSize: '0.8rem', padding: '6px 12px' }}>Clear History</button>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '400px', overflowY: 'auto' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '350px', overflowY: 'auto' }}>
             {history.map((item) => (
               <div key={item.id} style={{ background: '#0f172a', padding: '12px', borderRadius: '8px', border: '1px solid #334155' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '6px' }}>

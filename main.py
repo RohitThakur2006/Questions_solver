@@ -1,15 +1,25 @@
 import os
 import io
+import json
 import logging
-from typing import Dict, Any, Optional
+import random
+import re
+import time
+import threading
+from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, HTTPException, status, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mss
 from PIL import Image
+import pyautogui
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+
+# Configure PyAutoGUI safety settings
+pyautogui.FAILSAFE = True
+pyautogui.PAUSE = 0.1
 
 # Load environment variables
 load_dotenv()
@@ -20,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Mobile-Triggered AI Screen Analyzer",
-    description="Backend API for capturing screen, processing images in-memory, and analyzing via Gemini Vision API.",
-    version="1.0.0"
+    description="Backend API for capturing screen, processing images in-memory, and analyzing via Gemini Vision API with Manual and Autonomous Auto-Bot modes.",
+    version="2.0.0"
 )
 
 # Configure CORS for local network access (Pixel 8 / mobile browser)
@@ -52,7 +62,7 @@ def verify_token(x_auth_token: Optional[str] = Header(None)):
         )
     return x_auth_token
 
-# Predefined System Prompts Dictionary
+# Predefined System Prompts Dictionary for Manual Mode
 SYSTEM_PROMPTS: Dict[str, Dict[str, str]] = {
     "mcq_answer_only": {
         "name": "MCQ Answer Only",
@@ -80,6 +90,24 @@ class CaptureRequest(BaseModel):
     prompt_key: str
     custom_prompt: Optional[str] = None
 
+class AutomationStartRequest(BaseModel):
+    max_cycles: Optional[int] = 15
+    delay_seconds: Optional[float] = 4.0
+
+# Global Automation State & Lock
+automation_lock = threading.Lock()
+stop_event = threading.Event()
+automation_thread: Optional[threading.Thread] = None
+
+automation_state: Dict[str, Any] = {
+    "is_running": False,
+    "cycle": 0,
+    "max_cycles": 15,
+    "last_action": "Idle",
+    "last_answer": None,
+    "error": None
+}
+
 @app.get("/")
 def health_check():
     return {"status": "running", "service": "Mobile-Triggered AI Screen Analyzer Backend"}
@@ -99,7 +127,6 @@ def capture_and_optimize_screen(max_width: int = 1024) -> io.BytesIO:
     """
     try:
         with mss.mss() as sct:
-            # sct.monitors[1] is typically the primary monitor
             monitor = sct.monitors[1]
             sct_img = sct.grab(monitor)
             
@@ -124,10 +151,36 @@ def capture_and_optimize_screen(max_width: int = 1024) -> io.BytesIO:
             detail=f"Failed to capture screen: {str(e)}"
         )
 
+def get_screen_resolution() -> tuple[int, int]:
+    """Returns physical screen width and height using mss primary monitor."""
+    with mss.mss() as sct:
+        mon = sct.monitors[1]
+        return mon["width"], mon["height"]
+
+def translate_normalized_box(box: List[float], screen_w: int, screen_h: int) -> tuple[int, int]:
+    """
+    Translates Gemini 0-1000 normalized bounding box [ymin, xmin, ymax, xmax] 
+    to absolute screen center coordinates (x, y).
+    """
+    ymin, xmin, ymax, xmax = box
+    cx = int(((xmin + xmax) / 2.0 / 1000.0) * screen_w)
+    cy = int(((ymin + ymax) / 2.0 / 1000.0) * screen_h)
+    return cx, cy
+
+def perform_scatter_click(center_x: int, center_y: int, clicks: int = 3, radius: int = 8):
+    """
+    Executes a 'scatter click' cluster around the center point to guarantee selection.
+    """
+    for _ in range(clicks):
+        offset_x = center_x + random.randint(-radius, radius)
+        offset_y = center_y + random.randint(-radius, radius)
+        pyautogui.click(offset_x, offset_y)
+        time.sleep(0.08)
+
 @app.post("/capture")
 def trigger_analysis(req: CaptureRequest, token: Optional[str] = Depends(verify_token)):
     """
-    Triggers invisible screen capture, downscales in memory, 
+    Manual Mode: Triggers invisible screen capture, downscales in memory, 
     sends to Gemini API with selected system instruction, and returns answer.
     """
     if req.prompt_key not in SYSTEM_PROMPTS:
@@ -152,18 +205,16 @@ def trigger_analysis(req: CaptureRequest, token: Optional[str] = Depends(verify_
             detail="Gemini API client is not initialized. Please set GEMINI_API_KEY."
         )
     
-    # 1. Capture and downscale image in memory
+    # Capture and downscale image in memory
     image_buffer = capture_and_optimize_screen()
     
     try:
-        # Prepare image part for Gemini API
         image_bytes = image_buffer.read()
         image_part = types.Part.from_bytes(
             data=image_bytes,
             mime_type="image/jpeg",
         )
         
-        # 2. Call Gemini API with temperature 0.0 and system instruction
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[image_part, selected_prompt],
@@ -181,6 +232,243 @@ def trigger_analysis(req: CaptureRequest, token: Optional[str] = Depends(verify_
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"AI processing error: {str(e)}"
         )
+
+def parse_gemini_json(raw_text: str) -> dict:
+    """Robustly extract and parse JSON from Gemini response text."""
+    raw_text = raw_text.strip()
+
+    # Handle markdown code fences
+    json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', raw_text)
+    if json_match:
+        raw_text = json_match.group(1).strip()
+
+    # Extract outermost JSON object
+    start = raw_text.find('{')
+    end = raw_text.rfind('}')
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("No JSON object found in Gemini response")
+
+    raw_text = raw_text[start:end+1]
+
+    # Attempt 1: direct parse
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: replace single quotes with double quotes (common LLM issue)
+    # Only replace single quotes that act as JSON string delimiters (not inside words)
+    inside_str = False
+    prev = ''
+    chars = []
+    for ch in raw_text:
+        if ch == '"' and prev != '\\':
+            inside_str = not inside_str
+            chars.append(ch)
+        elif ch == "'" and not inside_str:
+            chars.append('"')
+        elif ch == "'" and inside_str:
+            chars.append("'")
+        else:
+            chars.append(ch)
+        prev = ch
+
+    cleaned = ''.join(chars)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 3: also remove trailing commas
+    cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.error(f"Gemini raw response text: {raw_text[:500]}")
+        raise
+
+def run_autonomous_loop(max_cycles: int, delay_seconds: float):
+    """
+    Background worker function running the autonomous bot loop.
+    Single API Call per cycle retrieves answer and spatial coordinates for option & submit buttons.
+    """
+    global automation_state
+    screen_w, screen_h = get_screen_resolution()
+    
+    auto_prompt = (
+        "You are an automated screen analyzer. Look at the multiple-choice question on screen:\n"
+        "1. Identify the correct answer option.\n"
+        "2. Provide the bounding box [ymin, xmin, ymax, xmax] on a 0-1000 scale for the option button/checkbox of the correct answer.\n"
+        "3. Provide the bounding box [ymin, xmin, ymax, xmax] on a 0-1000 scale for the 'Submit', 'Next', or 'Continue' button.\n"
+        "Output ONLY valid JSON matching the schema."
+    )
+
+    response_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "answer_text": {"type": "STRING"},
+            "option_box": {
+                "type": "ARRAY",
+                "items": {"type": "NUMBER"},
+                "minItems": 4,
+                "maxItems": 4
+            },
+            "submit_box": {
+                "type": "ARRAY",
+                "items": {"type": "NUMBER"},
+                "minItems": 4,
+                "maxItems": 4
+            }
+        },
+        "required": ["answer_text", "option_box", "submit_box"]
+    }
+
+    logger.info(f"Starting autonomous loop (max cycles: {max_cycles}, delay: {delay_seconds}s)")
+
+    for cycle in range(1, max_cycles + 1):
+        if stop_event.is_set():
+            logger.info("Stop signal received before cycle start.")
+            break
+
+        with automation_lock:
+            automation_state["cycle"] = cycle
+            automation_state["last_action"] = f"Cycle {cycle}/{max_cycles}: Capturing screen & analyzing..."
+
+        try:
+            # 1. Capture screen
+            image_buffer = capture_and_optimize_screen()
+            if stop_event.is_set():
+                break
+
+            image_bytes = image_buffer.read()
+            image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+
+            # 2. Single Gemini API Call for answer + spatial bounding boxes
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[image_part, auto_prompt],
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                    response_schema=response_schema
+                )
+            )
+
+            if stop_event.is_set():
+                break
+
+            # Parse JSON
+            data = parse_gemini_json(response.text)
+
+            answer_text = data.get("answer_text", "Unknown")
+            option_box = data.get("option_box")
+            submit_box = data.get("submit_box")
+
+            with automation_lock:
+                automation_state["last_answer"] = answer_text
+                automation_state["last_action"] = f"Cycle {cycle}: Answer found -> '{answer_text}'"
+
+            # 3. Scatter Click Option
+            if option_box and len(option_box) == 4:
+                opt_x, opt_y = translate_normalized_box(option_box, screen_w, screen_h)
+                with automation_lock:
+                    automation_state["last_action"] = f"Cycle {cycle}: Scatter clicking option at ({opt_x}, {opt_y})..."
+                
+                perform_scatter_click(opt_x, opt_y, clicks=3, radius=8)
+
+            time.sleep(0.5)
+            if stop_event.is_set():
+                break
+
+            # 4. Click Submit Button
+            if submit_box and len(submit_box) == 4:
+                sub_x, sub_y = translate_normalized_box(submit_box, screen_w, screen_h)
+                with automation_lock:
+                    automation_state["last_action"] = f"Cycle {cycle}: Clicking Submit at ({sub_x}, {sub_y})..."
+                
+                pyautogui.click(sub_x, sub_y)
+
+            # 5. Delay before next cycle (interruptible sleep)
+            with automation_lock:
+                automation_state["last_action"] = f"Cycle {cycle}: Completed. Waiting {delay_seconds}s for next question..."
+            
+            sleep_chunks = int(delay_seconds / 0.5)
+            for _ in range(sleep_chunks):
+                if stop_event.is_set():
+                    break
+                time.sleep(0.5)
+
+        except Exception as e:
+            logger.error(f"Automation error in cycle {cycle}: {str(e)}")
+            with automation_lock:
+                automation_state["error"] = f"Cycle {cycle} error: {str(e)}"
+                automation_state["last_action"] = f"Error in cycle {cycle}"
+            break
+
+    with automation_lock:
+        automation_state["is_running"] = False
+        automation_state["last_action"] = "Stopped" if stop_event.is_set() else f"Finished ({automation_state['cycle']}/{max_cycles} cycles)"
+    logger.info("Autonomous loop finished.")
+
+@app.post("/start-automation")
+def start_automation(req: AutomationStartRequest, token: Optional[str] = Depends(verify_token)):
+    """Starts the autonomous bot loop in a background thread."""
+    global automation_thread, automation_state
+
+    if not client:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Gemini API client is not initialized. Please set GEMINI_API_KEY."
+        )
+
+    with automation_lock:
+        if automation_state["is_running"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Automation is already running."
+            )
+
+        stop_event.clear()
+        max_cycles = min(max(1, req.max_cycles or 15), 15)  # Enforce 1-15 safety limit
+        delay = max(1.0, req.delay_seconds or 4.0)
+
+        automation_state.update({
+            "is_running": True,
+            "cycle": 0,
+            "max_cycles": max_cycles,
+            "last_action": "Starting automation...",
+            "last_answer": None,
+            "error": None
+        })
+
+        automation_thread = threading.Thread(
+            target=run_autonomous_loop,
+            args=(max_cycles, delay),
+            daemon=True
+        )
+        automation_thread.start()
+
+    return {"status": "started", "max_cycles": max_cycles, "delay_seconds": delay}
+
+@app.post("/stop-automation")
+def stop_automation(token: Optional[str] = Depends(verify_token)):
+    """Stops the autonomous bot loop immediately."""
+    with automation_lock:
+        if not automation_state["is_running"]:
+            return {"status": "already_stopped"}
+
+        stop_event.set()
+        automation_state["last_action"] = "Stop requested by user..."
+
+    return {"status": "stopping"}
+
+@app.get("/automation-status")
+def get_automation_status():
+    """Returns live status of the autonomous bot loop."""
+    with automation_lock:
+        return dict(automation_state)
 
 if __name__ == "__main__":
     import uvicorn

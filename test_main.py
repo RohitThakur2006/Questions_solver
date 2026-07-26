@@ -32,3 +32,26 @@ def test_capture_invalid_prompt():
         headers={"X-Auth-Token": API_TOKEN}
     )
     assert response.status_code == 400
+
+def test_automation_status():
+    response = client.get("/automation-status")
+    assert response.status_code == 200
+    data = response.json()
+    assert "is_running" in data
+    assert "cycle" in data
+    assert "max_cycles" in data
+
+def test_start_and_stop_automation_unauthorized():
+    res_start = client.post("/start-automation", json={"max_cycles": 5})
+    assert res_start.status_code == 401
+
+    res_stop = client.post("/stop-automation")
+    assert res_stop.status_code == 401
+
+def test_stop_automation_when_idle():
+    res_stop = client.post(
+        "/stop-automation",
+        headers={"X-Auth-Token": API_TOKEN}
+    )
+    assert res_stop.status_code == 200
+    assert res_stop.json()["status"] == "already_stopped"
