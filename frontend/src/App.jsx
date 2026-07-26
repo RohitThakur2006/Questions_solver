@@ -6,8 +6,17 @@ function App() {
   const [selectedPrompt, setSelectedPrompt] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
   const [backendUrl, setBackendUrl] = useState(`http://${window.location.hostname}:8000`);
+  const [authToken, setAuthToken] = useState('super-secret-token-123');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState('');
+  const [history, setHistory] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem('session_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
 
@@ -15,6 +24,15 @@ function App() {
   useEffect(() => {
     fetchPrompts();
   }, [backendUrl]);
+
+  // Save history to sessionStorage whenever it changes
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('session_history', JSON.stringify(history));
+    } catch (err) {
+      console.error("Failed to save session history:", err);
+    }
+  }, [history]);
 
   const fetchPrompts = async () => {
     try {
@@ -60,6 +78,7 @@ function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-Auth-Token': authToken,
         },
         body: JSON.stringify(payload),
       });
@@ -70,13 +89,34 @@ function App() {
         throw new Error(data.detail || `Server error: ${res.status}`);
       }
 
-      setResult(data.result);
+      const answerText = data.result;
+      setResult(answerText);
+
+      // Add to session history
+      const promptName = selectedPrompt === 'custom' 
+        ? `Custom: ${customPrompt.substring(0, 30)}...` 
+        : (prompts[selectedPrompt]?.name || selectedPrompt);
+
+      const newItem = {
+        id: Date.now(),
+        timestamp: new Date().toLocaleTimeString(),
+        mode: promptName,
+        answer: answerText
+      };
+
+      setHistory(prev => [newItem, ...prev]);
+
     } catch (err) {
       console.error("Capture trigger error:", err);
       setError(err.message || "Failed to trigger capture and analysis.");
     } finally {
       setLoading(false);
     }
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    sessionStorage.removeItem('session_history');
   };
 
   return (
@@ -90,7 +130,7 @@ function App() {
 
       <div className="settings-card">
         <label htmlFor="backend-url-input">Backend IP / URL:</label>
-        <div className="url-row">
+        <div className="url-row" style={{ marginBottom: '12px' }}>
           <input 
             id="backend-url-input"
             type="text" 
@@ -100,6 +140,26 @@ function App() {
           />
           <button onClick={fetchPrompts} className="btn-secondary">Reconnect</button>
         </div>
+
+        <label htmlFor="auth-token-input">Auth Token:</label>
+        <input 
+          id="auth-token-input"
+          type="password" 
+          value={authToken} 
+          onChange={(e) => setAuthToken(e.target.value)} 
+          placeholder="Enter secret token"
+          style={{
+            width: '100%',
+            padding: '10px',
+            borderRadius: '8px',
+            border: '1px solid #475569',
+            background: '#0f172a',
+            color: '#f8fafc',
+            fontSize: '0.95rem',
+            boxSizing: 'border-box',
+            outline: 'none'
+          }}
+        />
       </div>
 
       <div className="control-card">
@@ -174,9 +234,31 @@ function App() {
 
       {result && (
         <div className="result-card">
-          <h2>AI Answer</h2>
+          <h2>Latest AI Answer</h2>
           <div className="result-content">
             {result}
+          </div>
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div className="history-card" style={{ background: '#1e293b', borderRadius: '16px', padding: '20px', marginBottom: '16px', border: '1px solid #334155' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <h2 style={{ fontSize: '1.1rem', color: '#38bdf8', margin: 0 }}>Session History ({history.length})</h2>
+            <button onClick={clearHistory} className="btn-secondary" style={{ fontSize: '0.8rem', padding: '6px 12px' }}>Clear History</button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '400px', overflowY: 'auto' }}>
+            {history.map((item) => (
+              <div key={item.id} style={{ background: '#0f172a', padding: '12px', borderRadius: '8px', border: '1px solid #334155' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '6px' }}>
+                  <span style={{ fontWeight: 600, color: '#38bdf8' }}>{item.mode}</span>
+                  <span>{item.timestamp}</span>
+                </div>
+                <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'monospace', fontSize: '0.85rem', color: '#e2e8f0' }}>
+                  {item.answer}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

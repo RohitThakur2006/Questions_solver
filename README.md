@@ -7,7 +7,8 @@ A local Wi-Fi automation system that allows you to press a button on your mobile
 ## Architecture & Tech Stack
 
 *   **Backend (Host):** FastAPI (Python), `mss` (high-speed screen capture), `Pillow` (in-memory downscaling), `google-genai` SDK (`gemini-2.5-flash`).
-*   **Frontend (Trigger/Mobile):** React (Vite template), mobile-responsive UI.
+*   **Frontend (Trigger/Mobile):** React (Vite template), mobile-responsive UI with session-only history storage (`sessionStorage`).
+*   **Security:** Token-based authentication (`X-Auth-Token` header validation).
 *   **Network:** Local Wi-Fi network (direct laptop-to-phone communication via local IP).
 
 ---
@@ -36,10 +37,11 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Open `.env` and add your Gemini API Key:
+Open `.env` and add your Gemini API Key and secret `API_TOKEN`:
 ```env
 GEMINI_API_KEY=your_actual_gemini_api_key
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.5-flash-lite
+API_TOKEN=super-secret-token-123
 ```
 
 ### 2. Set Up Frontend
@@ -70,5 +72,7 @@ Note the local network URL displayed in your terminal (e.g., `http://192.168.1.5
 ### Step 3: Access from your Mobile Phone
 1. Ensure your phone and laptop are connected to the **same Wi-Fi network**.
 2. Open your phone browser and navigate to the Vite network URL (`http://<laptop-ip>:5173`).
-3. In the app settings, ensure the Backend URL points to `http://<laptop-ip>:8000`.
-4. Choose an AI mode (MCQ Answer Only, Explanation, Code Analysis, or Custom Prompt) and tap **Capture & Analyze Screen**!
+3. In the app settings on your phone:
+   - Ensure the Backend URL points to `http://<laptop-ip>:8000`.
+   - Enter your `Auth Token` matching the `API_TOKEN` set in your laptop's `.env` file.
+4. Choose an AI mode or type a custom prompt, then tap **Capture & Analyze Screen**!

@@ -2,7 +2,7 @@ import os
 import io
 import logging
 from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mss
@@ -40,8 +40,17 @@ if not GEMINI_API_KEY:
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# Default model (can be configured via env)
+# Default model and auth token
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+API_TOKEN = os.getenv("API_TOKEN", "super-secret-token-123")
+
+def verify_token(x_auth_token: Optional[str] = Header(None)):
+    if API_TOKEN and x_auth_token != API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing authentication token."
+        )
+    return x_auth_token
 
 # Predefined System Prompts Dictionary
 SYSTEM_PROMPTS: Dict[str, Dict[str, str]] = {
@@ -116,7 +125,7 @@ def capture_and_optimize_screen(max_width: int = 1024) -> io.BytesIO:
         )
 
 @app.post("/capture")
-def trigger_analysis(req: CaptureRequest):
+def trigger_analysis(req: CaptureRequest, token: Optional[str] = Depends(verify_token)):
     """
     Triggers invisible screen capture, downscales in memory, 
     sends to Gemini API with selected system instruction, and returns answer.
