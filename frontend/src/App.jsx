@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 function App() {
-  const [activeTab, setActiveTab] = useState('manual'); // 'manual' or 'auto'
+  const [activeTab, setActiveTab] = useState('manual'); // 'manual', 'auto', or 'coding'
   const [prompts, setPrompts] = useState({});
   const [selectedPrompt, setSelectedPrompt] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
@@ -14,18 +14,25 @@ function App() {
   const [connected, setConnected] = useState(false);
 
   // Auto-Bot Mode State
-  const [maxCycles, setMaxCycles] = useState(15);
-  const [delaySeconds, setDelaySeconds] = useState(4.0);
+  const [maxCycles, setMaxCycles] = useState(100);
+  const [delaySeconds, setDelaySeconds] = useState(0.5);
   const [automationStatus, setAutomationStatus] = useState({
     is_running: false,
     cycle: 0,
-    max_cycles: 15,
+    max_cycles: 100,
     last_action: 'Idle',
     last_answer: null,
     error: null
   });
   const fetchStatusRef = useRef(null);
-  const lastRecordedCycleRef = useRef(0);
+
+  // Coding Mode State
+  const [codingCount, setCodingCount] = useState(0);
+  const [codingHasAnswer, setCodingHasAnswer] = useState(false);
+  const [codingLoading, setCodingLoading] = useState(false);
+  const [codingCapturing, setCodingCapturing] = useState(false);
+  const [codingResult, setCodingResult] = useState('');
+  const [codingPrompt, setCodingPrompt] = useState('');
 
   // Session History (sessionStorage)
   const [history, setHistory] = useState(() => {
@@ -83,24 +90,29 @@ function App() {
   const fetchAutomationStatus = async () => {
     try {
       const res = await fetch(`${backendUrl}/automation-status`);
-      if (res.ok) {
-        const data = await res.json();
-        setAutomationStatus(data);
+      if (!res.ok) return;
+      const data = await res.json();
+      setAutomationStatus(data);
 
-        if (data.is_running && data.last_answer && data.cycle > 0 && data.cycle !== lastRecordedCycleRef.current) {
-          lastRecordedCycleRef.current = data.cycle;
-          const newItem = {
-            id: Date.now(),
+      // The backend "results" list is the single source of truth for Auto Bot history.
+      // Rebuild the Auto Bot portion of history from it on every poll so it always
+      // reflects the full, correct set of answered questions (never duplicates).
+      if (Array.isArray(data.results)) {
+        const autoItems = data.results
+          .filter(r => r && r.question != null && r.answer != null)
+          .map(r => ({
+            id: `${data.run_id}-${r.question}`,
             timestamp: new Date().toLocaleTimeString(),
-            mode: `Auto Bot (Cycle ${data.cycle})`,
-            answer: data.last_answer
-          };
-          setHistory(prev => [newItem, ...prev]);
-        }
+            mode: 'Auto Bot',
+            question: r.question,
+            answer: r.answer
+          }))
+          .reverse(); // newest question first
 
-        if (!data.is_running && data.cycle === 0) {
-          lastRecordedCycleRef.current = 0;
-        }
+        setHistory(prev => {
+          const manualItems = prev.filter(i => i.mode !== 'Auto Bot');
+          return [...autoItems, ...manualItems];
+        });
       }
     } catch (err) {
       console.error("Failed to fetch automation status:", err);
@@ -180,7 +192,7 @@ function App() {
         },
         body: JSON.stringify({
           max_cycles: parseInt(maxCycles, 10),
-          delay_seconds: parseFloat(delaySeconds)
+          delay_seconds: parseFloat(delaySeconds) || 0.1
         }),
       });
 
@@ -223,6 +235,112 @@ function App() {
     sessionStorage.removeItem('session_history');
   };
 
+  const fetchCodingStatus = async () => {
+    try {
+      const res = await fetch(`${backendUrl}/coding/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setCodingCount(data.count);
+        setCodingHasAnswer(data.has_answer);
+      }
+    } catch (err) {
+      console.error("Failed to fetch coding status:", err);
+    }
+  };
+
+  const handleCodingCapture = async () => {
+    setCodingCapturing(true);
+    setError('');
+    try {
+      const res = await fetch(`${backendUrl}/coding/capture`, {
+        method: 'POST',
+        headers: { 'X-Auth-Token': authToken },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Server error: ${res.status}`);
+      setCodingCount(data.count);
+    } catch (err) {
+      console.error("Coding capture error:", err);
+      setError(err.message || "Failed to capture screenshot.");
+    } finally {
+      setCodingCapturing(false);
+    }
+  };
+
+  const handleCodingClear = async () => {
+    setError('');
+    setCodingResult('');
+    try {
+      const res = await fetch(`${backendUrl}/coding/clear`, {
+        method: 'POST',
+        headers: { 'X-Auth-Token': authToken },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Server error: ${res.status}`);
+      setCodingCount(data.count);
+      setCodingHasAnswer(false);
+    } catch (err) {
+      console.error("Coding clear error:", err);
+      setError(err.message || "Failed to clear screenshots.");
+    }
+  };
+
+  const handleCodingSolve = async () => {
+    setError('');
+    setCodingResult('');
+    if (codingCount === 0) {
+      setError("Capture at least one screenshot first.");
+      return;
+    }
+    setCodingLoading(true);
+    try {
+      const res = await fetch(`${backendUrl}/coding/solve`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Auth-Token': authToken,
+        },
+        body: JSON.stringify({ custom_prompt: codingPrompt.trim() || null }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Server error: ${res.status}`);
+      setCodingResult(data.result);
+      setCodingHasAnswer(true);
+    } catch (err) {
+      console.error("Coding solve error:", err);
+      setError(err.message || "Failed to solve the problem.");
+    } finally {
+      setCodingLoading(false);
+    }
+  };
+
+  const handleCodingPaste = async (method) => {
+    setError('');
+    // Tell the user immediately where to focus, BEFORE the backend types,
+    // otherwise they never know to click into the editor field.
+    if (method === 'type') {
+      setError('Typing code onto your computer... Click your editor field within 2 seconds.');
+    }
+    try {
+      const res = await fetch(`${backendUrl}/coding/paste`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Auth-Token': authToken,
+        },
+        body: JSON.stringify({ method }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Server error: ${res.status}`);
+      setError(method === 'type'
+        ? 'Typing complete. Code was typed into your editor.'
+        : 'Pasted to computer. Click your editor field within 2 seconds of the next paste.');
+    } catch (err) {
+      console.error("Coding paste error:", err);
+      setError(err.message || "Failed to paste code.");
+    }
+  };
+
   return (
     <div className="container">
       <header className="header">
@@ -245,6 +363,12 @@ function App() {
           onClick={() => setActiveTab('auto')}
         >
           🤖 Auto Bot Mode {automationStatus.is_running && <span className="running-dot">●</span>}
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'coding' ? 'active' : ''}`}
+          onClick={() => setActiveTab('coding')}
+        >
+          💻 Coding Mode
         </button>
       </div>
 
@@ -358,12 +482,12 @@ function App() {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
             <div>
-              <label htmlFor="max-cycles-input">Max Cycles (1-15):</label>
+              <label htmlFor="max-cycles-input">Max Cycles (1-100):</label>
               <input 
                 id="max-cycles-input"
                 type="number" 
                 min="1" 
-                max="15" 
+                max="100" 
                 value={maxCycles} 
                 onChange={(e) => setMaxCycles(e.target.value)}
                 disabled={automationStatus.is_running}
@@ -375,7 +499,7 @@ function App() {
                 id="delay-input"
                 type="number" 
                 step="0.5" 
-                min="1" 
+                min="0.5" 
                 value={delaySeconds} 
                 onChange={(e) => setDelaySeconds(e.target.value)}
                 disabled={automationStatus.is_running}
@@ -429,6 +553,107 @@ function App() {
         </div>
       )}
 
+      {/* CODING MODE UI */}
+      {activeTab === 'coding' && (
+        <div className="control-card">
+          <h2>Coding Problem Solver</h2>
+          <p className="prompt-desc">
+            Capture one or more screenshots of a coding problem (e.g. problem statement, examples, starter code), then send them all to the AI at once for a single solution. Optionally paste the answer directly into your editor on the computer.
+          </p>
+
+          <div className="status-box" style={{ background: '#0f172a', padding: '14px', borderRadius: '10px', marginBottom: '16px', border: '1px solid #334155' }}>
+            <div style={{ fontSize: '0.85rem', color: '#cbd5e1' }}>
+              <strong>Captured Screenshots:</strong> {codingCount}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
+            <button 
+              onClick={handleCodingCapture} 
+              disabled={codingCapturing || !connected} 
+              className="btn-primary"
+            >
+              {codingCapturing ? 'Capturing...' : `📸 Capture Screenshot (${codingCount})`}
+            </button>
+            <button 
+              onClick={handleCodingClear} 
+              disabled={codingCount === 0 || codingLoading} 
+              className="btn-secondary"
+            >
+              🗑 Clear Screenshots
+            </button>
+          </div>
+
+          <div className="custom-prompt-container" style={{ marginBottom: '16px' }}>
+            <label htmlFor="coding-prompt-input">Additional Instructions (optional):</label>
+            <textarea
+              id="coding-prompt-input"
+              value={codingPrompt}
+              onChange={(e) => setCodingPrompt(e.target.value)}
+              placeholder="e.g. Use Python, optimize for large inputs, explain the approach in comments..."
+              rows={3}
+              style={{
+                width: '100%',
+                padding: '12px',
+                borderRadius: '8px',
+                border: '1px solid #475569',
+                background: '#0f172a',
+                color: '#f8fafc',
+                fontSize: '0.95rem',
+                boxSizing: 'border-box',
+                resize: 'vertical',
+                outline: 'none',
+                fontFamily: 'inherit'
+              }}
+            />
+          </div>
+
+          <button 
+            onClick={handleCodingSolve} 
+            disabled={codingLoading || codingCount === 0 || !connected} 
+            className="btn-primary"
+            style={{ width: '100%' }}
+          >
+            {codingLoading ? (
+              <span className="spinner-container">
+                <span className="spinner"></span> Solving {codingCount} screenshot(s)...
+              </span>
+            ) : (
+              `🚀 Solve Problem (${codingCount} screenshot${codingCount === 1 ? '' : 's'})`
+            )}
+          </button>
+
+          {codingResult && (
+            <div className="result-card" style={{ marginTop: '16px' }}>
+              <h2>Solution Answer</h2>
+              <div className="result-content" style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
+                {codingResult}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '12px' }}>
+                <button 
+                  onClick={() => handleCodingPaste('paste')} 
+                  disabled={!connected} 
+                  className="btn-primary"
+                >
+                  📋 Paste Code to Computer
+                </button>
+                <button 
+                  onClick={() => handleCodingPaste('type')} 
+                  disabled={!connected} 
+                  className="btn-primary"
+                  style={{ background: 'linear-gradient(135deg, #334155 0%, #475569 100%)', boxShadow: '0 4px 12px rgba(71, 85, 105, 0.3)' }}
+                >
+                  ⌨️ Type Code (if paste blocked)
+                </button>
+              </div>
+              <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '8px', textAlign: 'center' }}>
+                Tap an option, then click your editor field on the computer within 2 seconds.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {error && (
         <div className="error-card">
           <strong>⚠️ Error</strong>
@@ -455,7 +680,7 @@ function App() {
             {history.map((item) => (
               <div key={item.id} style={{ background: '#0f172a', padding: '12px', borderRadius: '8px', border: '1px solid #334155' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '6px' }}>
-                  <span style={{ fontWeight: 600, color: '#38bdf8' }}>{item.mode}</span>
+                  <span style={{ fontWeight: 600, color: '#38bdf8' }}>{item.mode}{item.question != null ? ` — Question ${item.question}` : ''}</span>
                   <span>{item.timestamp}</span>
                 </div>
                 <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'monospace', fontSize: '0.85rem', color: '#e2e8f0' }}>
